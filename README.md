@@ -8,6 +8,7 @@ A comprehensive, hands-on guide to **Low-Level Design (LLD)** interviews — cov
 
 | Section | Description |
 |---------|-------------|
+| [OOP Concepts](#-oop-concepts) | 4 pillars + composition, interfaces vs abstract classes, enums with Java examples |
 | [SOLID Principles](#-solid-principles) | 5 foundational design principles with bad vs good code examples |
 | [Design Patterns](#-design-patterns) | 15 GoF patterns (Creational, Structural, Behavioral) with Java implementations |
 | [Concurrency Controls](#-concurrency-controls) | 7 essential concurrency patterns for thread-safe system design |
@@ -20,6 +21,10 @@ A comprehensive, hands-on guide to **Low-Level Design (LLD)** interviews — cov
 
 ```
 LLD-Interview Prep Handbook/
+│
+├── oops/                               # OOP Concepts
+│   ├── OOPConcepts.java
+│   └── README.md
 │
 ├── solidprinciples/                    # SOLID Principles
 │   ├── SingleResponsibilityPrinciple/
@@ -63,6 +68,24 @@ LLD-Interview Prep Handbook/
 │
 └── LLD_INTERVIEW_TEMPLATE.md           # Interview Delivery Framework
 ```
+
+---
+
+## 🧬 OOP Concepts
+
+4 pillars of OOP + essential concepts, each with clear bad vs good examples and LLD-specific context.
+
+| Concept | One-Liner | LLD Relevance |
+|---------|-----------|---------------|
+| **Encapsulation** | Private state + controlled access | Every entity (Slot, Room, Seat) hides internals |
+| **Abstraction** | Hide complexity behind interfaces | PricingStrategy, NotificationSender contracts |
+| **Inheritance** | Share state via "is-a" hierarchies | Vehicle → Bike, Car, Truck |
+| **Polymorphism** | Same method, different behavior at runtime | Strategy, Factory, Observer patterns |
+| **Composition** | Build objects with "has-a" relationships | ParkingLot → Floor → Slot |
+| **Interfaces vs Abstract Classes** | Contract vs partial implementation | When to use which in LLD |
+| **Enums** | Type-safe constants with behavior | Status machines, vehicle/slot types |
+
+📁 [`oops/`](./oops/)
 
 ---
 
@@ -194,8 +217,8 @@ java problems.ParkingLotSystem.ParkingLotSystemComplete
 ## 📖 Recommended Learning Path
 
 ```
-Week 1: SOLID Principles
-  └── Study each principle → Run examples → Identify violations in your own code
+Week 1: OOP Concepts + SOLID Principles
+  └── OOP pillars → SOLID principles → Run examples → Identify violations in your own code
 
 Week 2: Design Patterns
   └── Creational → Structural → Behavioral → Practice pattern selection
