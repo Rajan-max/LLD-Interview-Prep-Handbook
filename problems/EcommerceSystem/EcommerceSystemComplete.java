@@ -12,7 +12,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * 
  * Following LLD_INTERVIEW_TEMPLATE.md with strong concurrency focus
  * 
- * Key Features:
+ * Key Feature:
  * - Product inventory management with atomic operations
  * - Order processing with ACID properties
  * - Shopping cart with session management
