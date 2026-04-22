@@ -1,152 +1,203 @@
 # Hotel Booking System - LLD Interview Solution 🏨
-
-> **Following**: LLD_INTERVIEW_TEMPLATE.md structure with strong concurrency focus
-
 ---
 
-## 🎯 STEP 1: REQUIREMENTS GATHERING
+## 1) Requirements (~5 min)
 
-### Functional Requirements
+**Prompt**: "Design a hotel booking system where guests can search and reserve rooms."
 
-1. **FR1**: Support different room types (SINGLE, DOUBLE, SUITE) with base pricing
-2. **FR2**: Search available rooms by type and date range
-3. **FR3**: Reserve room for date range (two-step: lock → confirm)
-4. **FR4**: Calculate total amount based on nights and room type
-5. **FR5**: Cancel bookings and release dates
-6. **FR6**: Prevent double-booking with thread-safe operations
+### Clarifying Questions
 
-### Non-Functional Requirements
+| Theme | Question | Answer |
+|---|---|---|
+| **Primary capabilities** | What operations? | Search rooms, reserve room, confirm booking, cancel booking |
+| **Primary capabilities** | Room types? | Yes — SINGLE, DOUBLE, SUITE with different pricing |
+| **Rules** | How is booking done? | Two-step: lock room → confirm after payment |
+| **Rules** | How is fee calculated? | Nights × room base price |
+| **Error handling** | What if no rooms available? | Reject with error |
+| **Error handling** | Double-booking attempt? | Second request fails gracefully |
+| **Scope** | Concurrent access? | Yes, multiple guests booking simultaneously |
 
-1. **NFR1**: **Concurrency** - Support 500+ concurrent booking requests
-2. **NFR2**: **Performance** - Booking response time < 200ms
-3. **NFR3**: **Consistency** - No double-booking, atomic operations
-4. **NFR4**: **Availability** - 99.9% uptime
-5. **NFR5**: **Scale** - Support 10,000+ rooms
-6. **NFR6**: **Extensibility** - Easy to add new room types and pricing strategies
-
-### Assumptions
-
-1. In-memory storage (production would use database)
-2. Single hotel (can extend to multiple)
-3. Date-based bookings (check-in to check-out)
-4. One room per booking
-5. Payment processing is synchronous
-6. No reservation system beyond the two-step lock → confirm flow
-
-### Out of Scope
-
-1. Multi-hotel management
-2. Dynamic pricing strategies
-3. Complex cancellation policies
-4. Payment gateway integration
-5. Check-in/check-out workflow
-6. Guest loyalty programs
-
----
-
-## 🏗️ STEP 2: DOMAIN MODELING
-
-### Core Entities
-
-#### **Room**
-- **Purpose**: Bookable accommodation unit with date-based availability
-- **Attributes**: id, type, bookingSchedule
-- **Status**: AVAILABLE → RESERVED → AVAILABLE
-- **Concurrency**: High contention - needs room-level locking
-
-#### **Guest**
-- **Purpose**: Customer making reservations
-- **Attributes**: id, name
-- **Lifecycle**: Immutable after creation
-
-#### **Booking**
-- **Purpose**: Reservation linking guest, room, and dates
-- **Attributes**: id, guest, room, checkIn, checkOut, totalAmount, status
-- **Status**: PENDING → CONFIRMED / CANCELLED
-- **Lifecycle**: Created → Paid → Confirmed → Cancelled
-
-### Entity Relationships
+### Requirements
 
 ```
-Booking (1) ──for──> (1) Guest
-Booking (1) ──reserves──> (1) Room
-Room (N) ──grouped by──> (1) RoomType
+1. Support room types (SINGLE, DOUBLE, SUITE) with different pricing
+2. Search available rooms by type and date range
+3. Reserve a room for a date range (two-step: lock → confirm)
+4. Calculate total based on nights × room rate
+5. Cancel bookings and release dates
+6. Prevent double-booking under concurrent access
+
+Out of Scope:
+- Payment gateway integration
+- Check-in/check-out workflow
+- Multi-hotel management
+- Dynamic pricing / cancellation policies
+- Guest loyalty programs
 ```
 
 ---
 
-## 🎨 STEP 3: DESIGN PATTERNS & ARCHITECTURE
-
-### Architecture Layers
+## 2) Entities & Relationships (~3 min)
 
 ```
-┌─────────────────────────────────────┐
-│   BookingManager (Service Layer)    │ ← Entry point
-├─────────────────────────────────────┤
-│   RoomManager (Resource Mgmt)       │ ← Room registry + locks
-├─────────────────────────────────────┤
-│   Repository Layer (In-memory)      │ ← Data storage
-├─────────────────────────────────────┤
-│   Domain Models (Entities)          │ ← Room, Guest, Booking
-└─────────────────────────────────────┘
+Entities:
+- Room           (bookable resource, owns date-based schedule)
+- Guest          (person making the booking — immutable)
+- Booking        (links guest + room + dates, tracks status)
+- RoomManager    (resource registry + per-room locks)
+- BookingManager (orchestrator — search, lock, confirm, cancel)
+
+Relationships:
+- BookingManager → RoomManager (uses for room lookup + locks)
+- BookingManager → BookingRepository (persists bookings)
+- Booking → Guest, Room (references)
+- Room grouped by RoomType
 ```
 
-### Design Patterns Used
-
-#### **1. State Pattern** (Booking Lifecycle)
-- **Problem**: Booking transitions through states
-- **Solution**: BookingStatus enum (PENDING → CONFIRMED / CANCELLED)
-- **Benefit**: Clear state transitions, invalid transitions prevented
-
-#### **2. Manager Pattern** (Resource + Service separation)
-- **Problem**: Separate room management from booking business logic
-- **Solution**: RoomManager (resource registry + locks) + BookingManager (business logic)
-- **Benefit**: Single responsibility, testable components
-
-#### **3. Repository Pattern** (Data Access)
-- **Problem**: Clean separation of business logic and data storage
-- **Solution**: BookingRepository with ConcurrentHashMap
-- **Benefit**: Testable, swappable storage backends
+**Key decisions:**
+- Locks live inside RoomManager (not BookingManager) — RoomManager owns rooms, so it owns their locks
+- RoomManager handles resource registry + locks, BookingManager handles business logic (single responsibility)
+- Two-step flow (lock → confirm) mirrors real-world payment workflows — room is held while guest pays
 
 ---
 
-## 🔐 STEP 4: CONCURRENCY CONTROL (CRITICAL!)
+## 3) Class Design (~10 min)
 
-### Concurrency Analysis
+### Deriving State from Requirements
 
-#### **Shared Resources**
-1. **Room.bookingSchedule** - Multiple threads booking same room
-2. **BookingRepository** - Concurrent booking creation
-3. **RoomManager.roomsByType** - Concurrent search operations
+| Requirement | What must be tracked | Where |
+|---|---|---|
+| "Room types with pricing" | id, type (with basePrice) | Room, RoomType enum |
+| "Date-based availability" | bookingSchedule: Map<LocalDate, String> | Room |
+| "Reserve room (lock → confirm)" | id, guest, room, checkIn, checkOut, status, totalAmount | Booking |
+| "Prevent double-booking" | per-room ReentrantLock | RoomManager |
 
-#### **Critical Sections**
-1. **Check availability + Reserve** - Must be atomic
-2. **Confirm booking** - Must verify PENDING status atomically
-3. **Cancel + Release dates** - Must be atomic
+### Deriving Behavior from Requirements
 
-#### **Race Conditions**
-1. **Double-booking**: Two threads book same room for overlapping dates
-2. **Lost update**: Concurrent status changes overwrite
-3. **Phantom read**: Room appears available but gets booked
+| Need | Method | On |
+|---|---|---|
+| Search and reserve a room | SearchAndLockRoom(guest, type, checkIn, checkOut) → Booking | BookingManager |
+| Confirm after payment | confirmBooking(bookingId) → Booking | BookingManager |
+| Cancel and release dates | cancelBooking(bookingId) | BookingManager |
+| Check if room is available for dates | isAvailable(checkIn, checkOut) → bool | Room |
+| Reserve / release dates on room | reserve(checkIn, checkOut, bookingId), release(checkIn, checkOut) | Room |
 
-### Concurrency Strategy: Room-Level Locking ⭐
+### Class Outlines
 
-**Why Room-Level Locking?**
-- ✅ Maximum parallelism (different rooms = no contention)
-- ✅ Strong consistency (no double-booking)
-- ✅ Scalable (contention only on same room)
-- ✅ Simple (no complex distributed locking)
+```
+class Room:                                 // Caller MUST hold lock
+  - id: String
+  - type: RoomType
+  - bookingSchedule: ConcurrentHashMap<LocalDate, String>
 
-**Implementation:**
+  + isAvailable(checkIn, checkOut) → bool
+  + reserve(checkIn, checkOut, bookingId)
+  + release(checkIn, checkOut)
+
+class RoomManager:
+  - roomsByType: ConcurrentHashMap<RoomType, List<Room>>
+  - roomLocks: ConcurrentHashMap<String, ReentrantLock>
+
+  + addRoom(room)
+  + getRoomByType(type) → List<Room>
+  + getRoomLock(roomId) → ReentrantLock
+
+class BookingManager:                       // Orchestrator
+  - roomManager: RoomManager
+  - bookingRepository: BookingRepository
+
+  + SearchAndLockRoom(guest, type, checkIn, checkOut) → Booking
+  + confirmBooking(bookingId) → Booking
+  + cancelBooking(bookingId)
+
+class Booking:
+  - id: String (auto-generated)
+  - guest: Guest
+  - room: Room
+  - checkIn, checkOut: LocalDate
+  - totalAmount: double
+  - status: volatile BookingStatus (PENDING → CONFIRMED / CANCELLED)
+
+class Guest:
+  - id, name (immutable)
+
+enum RoomType:
+  SINGLE(100.0, 1), DOUBLE(150.0, 2), SUITE(300.0, 4)
+  - basePrice, maxOccupancy
+```
+
+### Key Principle
+
+- **Workflow rules** (can this booking be confirmed?) → BookingManager (orchestrator)
+- **Data rules** (is this date range available?) → Room (owns the schedule)
+
+---
+
+## 4) Concurrency Control (~5 min)
+
+### Three Questions
+
+**What is shared?**
+- Room.bookingSchedule — multiple threads booking the same room for overlapping dates
+
+**What can go wrong?**
+- Double-booking: Two threads book the same room for overlapping dates
+- Lost update: Concurrent status changes (confirm/cancel) overwrite each other
+
+**What's the locking strategy?**
+- Room-level locking. Each room has its own ReentrantLock inside RoomManager.
+
+### Why Room-Level Locking?
+
+| Approach | Throughput | Decision |
+|---|---|---|
+| **Hotel-level lock** | Very low (serializes everything) | ❌ Too coarse |
+| **Room-level lock** | High (parallel across all rooms) | ✅ Chosen |
+| **Date-level lock** | Very high but complex deadlock risk | ❌ Over-engineered |
+
+### Concurrency Strategy
+
+```
+Shared resource:
+- Room.bookingSchedule — multiple threads trying to book same room
+
+Race condition prevented:
+- Double-booking: tryLock + isAvailable + reserve is atomic under lock
+
+Locking approach:
+- Each room has its own ReentrantLock(true) — fair lock, inside RoomManager
+- SearchAndLockRoom uses tryLock(5s) — skip to next room on timeout
+- confirmBooking uses lock() (blocking) — must confirm this specific booking
+- cancelBooking uses lock() (blocking) — must release this specific room's dates
+
+Thread-safety:
+- Room: ConcurrentHashMap schedule + external lock (caller MUST hold lock)
+- Guest: immutable after creation
+- Booking: volatile status + immutable fields
+- BookingRepository: ConcurrentHashMap
+- RoomManager: ConcurrentHashMap for rooms and locks
+```
+
+**Why tryLock(5s) for search (with timeout)?**
+A guest doesn't care *which* room they get — if one is locked, wait briefly then skip to the next. Timeout prevents indefinite blocking.
+
+**Why lock() for confirm/cancel (blocking)?**
+We *must* operate on the specific room tied to the booking. We have to wait for the lock.
+
+**No deadlock risk:**
+Each operation locks only one room at a time — no multi-resource locking, no lock ordering needed.
+
+---
+
+## 5) Implementation (~10 min)
+
+### Core Method: SearchAndLockRoom
 
 ```java
-// 1. Each room has its own fair lock (in RoomManager)
-private final ConcurrentHashMap<String, ReentrantLock> roomLocks;
-
-// 2. Atomic search-and-reserve operation
 public Booking SearchAndLockRoom(Guest guest, RoomType type,
                                  LocalDate checkIn, LocalDate checkOut) {
     List<Room> rooms = roomManager.getRoomByType(type);
+
     for (Room room : rooms) {
         ReentrantLock lock = roomManager.getRoomLock(room.getId());
         try {
@@ -171,154 +222,109 @@ public Booking SearchAndLockRoom(Guest guest, RoomType type,
 }
 ```
 
-### Thread-Safety Guarantees
+**What this demonstrates:**
+- Atomic check-and-reserve (no gap between isAvailable and reserve)
+- tryLock with 5s timeout (non-blocking, prevents indefinite wait)
+- Proper lock release in finally block
+- Iterates through all rooms of type (first available wins)
 
-| Component | Thread-Safety | Mechanism |
-|-----------|---------------|-----------|
-| **Room** | Thread-safe | Volatile + External lock |
-| **Guest** | Thread-safe | Immutable after creation |
-| **Booking** | Thread-safe | Volatile status + immutable fields |
-| **RoomManager** | Thread-safe | ConcurrentHashMap + per-room locks |
-| **BookingManager** | Thread-safe | Room-level locking |
-| **BookingRepository** | Thread-safe | ConcurrentHashMap |
+### Core Method: confirmBooking
 
-### Concurrency Alternatives Considered
-
-| Approach | Pros | Cons | Decision |
-|----------|------|------|----------|
-| **Hotel-level lock** | Simple | Very low throughput | ❌ Too coarse |
-| **Room-level lock** | High throughput | More memory | ✅ **Chosen** |
-| **Optimistic locking** | No blocking | Retry storms | ❌ High contention |
-| **Date-level lock** | Fine-grained | Complex deadlock risk | ❌ Over-engineered |
-
----
-
-## 💻 STEP 5: CLASS DESIGN & IMPLEMENTATION
-
-### Class Structure
-
-```
-com.rajan.lld.InterviewQuestionsPractice.HotelBookingSystem
-├── HotelBookingSystemComplete.java (All-in-one)
-│   ├── Enums (RoomType, BookingStatus)
-│   ├── Models (Room, Guest, Booking)
-│   ├── Repository (BookingRepository)
-│   ├── Manager (RoomManager, BookingManager)
-│   └── Demo (Main class with 4 concurrency tests)
-```
-
-### Key Classes
-
-#### **Room** (High Concurrency)
 ```java
-/**
- * Thread-Safety: Volatile + external lock
- * Concurrency: Caller MUST hold lock before modifying
- */
-class Room {
-    private final String id;
-    private final RoomType type;
-    private final ConcurrentHashMap<LocalDate, String> bookingSchedule;
+public Booking confirmBooking(String bookingId) {
+    Booking booking = bookingRepository.findById(bookingId);
+    if (booking == null)
+        throw new IllegalArgumentException("Booking not found");
 
-    // Caller MUST hold lock
-    public boolean isAvailable(LocalDate checkIn, LocalDate checkOut) {
-        for (LocalDate date = checkIn; date.isBefore(checkOut); date = date.plusDays(1)) {
-            if (bookingSchedule.containsKey(date)) return false;
-        }
-        return true;
+    Room room = booking.getRoom();
+    ReentrantLock lock = roomManager.getRoomLock(room.getId());
+
+    lock.lock();                                     // Blocking — must confirm this specific room
+    try {
+        if (booking.getStatus() != BookingStatus.PENDING)
+            throw new IllegalStateException("Booking cannot be confirmed");
+        booking.confirm();
+        return booking;
+    } finally {
+        lock.unlock();
     }
-
-    // Caller MUST hold lock
-    public void reserve(LocalDate checkIn, LocalDate checkOut, String bookingId) { ... }
-
-    // Caller MUST hold lock
-    public void release(LocalDate checkIn, LocalDate checkOut) { ... }
 }
 ```
 
-#### **RoomManager** (Resource Management)
+### Core Method: cancelBooking
+
 ```java
-/**
- * Thread-safe: ConcurrentHashMap + per-room fair locks
- * Separates resource registry from business logic
- */
-class RoomManager {
-    private final ConcurrentHashMap<RoomType, List<Room>> roomsByType;
-    private final ConcurrentHashMap<String, ReentrantLock> roomLocks;
+public void cancelBooking(String bookingId) {
+    Booking booking = bookingRepository.findById(bookingId);
+    if (booking == null)
+        throw new IllegalArgumentException("Booking not found");
 
-    public void addRoom(Room room) { ... }
-    public List<Room> getRoomByType(RoomType type) { ... }
-    public ReentrantLock getRoomLock(String roomId) { ... }
+    Room room = booking.getRoom();
+    ReentrantLock lock = roomManager.getRoomLock(room.getId());
+
+    lock.lock();                                     // Blocking — must release this specific room
+    try {
+        room.release(booking.getCheckIn(), booking.getCheckOut());
+        booking.cancel();
+    } finally {
+        lock.unlock();
+    }
 }
 ```
 
-#### **BookingManager** (Core Service)
-```java
-/**
- * Thread-safe using room-level locking
- * Two-step flow: SearchAndLockRoom → confirmBooking
- */
-class BookingManager {
-    private final BookingRepository bookingRepository;
-    private final RoomManager roomManager;
+**Edge cases handled:**
+- Booking not found → IllegalArgumentException
+- Confirm non-PENDING booking → IllegalStateException
+- Cancel releases dates back to room's schedule (makes room available again)
 
-    public BookingManager(RoomManager roomManager) { ... }
+### Verification: Walk Through a Scenario
 
-    // Step 1: Search + Lock (before payment)
-    public Booking SearchAndLockRoom(Guest, RoomType, checkIn, checkOut) { ... }
+```
+Scenario: Two threads try to book the same DOUBLE room for overlapping dates
 
-    // Step 2: Confirm (after payment)
-    public Booking confirmBooking(String bookingId) { ... }
+Thread A: SearchAndLockRoom(Guest A, DOUBLE, Jan 5-10)
+  → Acquires lock on Room R2
+  → R2.isAvailable(Jan 5-10) = true
+  → R2.reserve(Jan 5-10, "BK-1001")
+  → Returns Booking BK-1001
+  → Releases lock
 
-    // Cancel booking
-    public void cancelBooking(String bookingId) { ... }
-}
+Thread B: SearchAndLockRoom(Guest B, DOUBLE, Jan 8-12)
+  → Acquires lock on Room R2 (after Thread A releases)
+  → R2.isAvailable(Jan 8-12) = false (Jan 8,9 already reserved)
+  → Moves to next DOUBLE room or throws "No available rooms"
+
+✓ No double-booking. Atomic check + reserve under lock.
 ```
 
 ---
 
-## 🧪 STEP 6: TESTING STRATEGY
+## 6) Testing Strategy (~3 min)
 
-### Test Distribution
-- **70%** Unit tests
-- **20%** Concurrency tests
-- **10%** Integration tests
+**Functional tests:**
+- Search and lock a DOUBLE room, confirm it, verify status = CONFIRMED
+- Calculate total: 3 nights × $150 (DOUBLE) = $450
+- Cancel a confirmed booking, verify dates are released
+- Confirm a non-existent booking → IllegalArgumentException
 
-### Concurrency Tests
+**Concurrency tests:**
+- **Single room contention**: 10 threads, 1 SINGLE room, same dates → only 1 succeeds
+- **Parallel different rooms**: 10 threads, 10 DOUBLE rooms, same dates → all 10 succeed
+- **Overlapping date conflict**: Thread 1 books Day 50-55, Thread 2 books Day 53-58 on same room → one fails
+- **Cancel and re-book**: Cancel existing booking, then another thread books same room/dates → both succeed
 
-1. **Single Room Concurrent Booking**: 10 threads, same SINGLE room, same dates → Only 1 succeeds
-2. **Different Rooms**: 10 threads, 10 different DOUBLE rooms → All 10 succeed
-3. **Overlapping Dates**: Thread 1 books Day 50-55, Thread 2 books Day 53-58 → One fails
-4. **Cancel and Book**: Cancel existing booking, then another thread books same room → Both succeed
-
----
-
-## 📊 STEP 7: COMPLEXITY ANALYSIS
-
-### Time Complexity
-
-| Operation | Complexity | Explanation |
-|-----------|------------|-------------|
-| **Search & Lock** | O(R × D) | R rooms of type, D days to check |
-| **Confirm booking** | O(1) | Status update with lock |
-| **Cancel booking** | O(D) | D days to release |
-
-### Space Complexity
-
-| Component | Complexity | Explanation |
-|-----------|------------|-------------|
-| **Rooms** | O(R) | R rooms in system |
-| **Bookings** | O(B) | B bookings |
-| **Room locks** | O(R) | One lock per room |
-| **Booking schedule** | O(R × D) | R rooms, D days booked |
+**Edge cases:**
+- All rooms of a type are booked for requested dates
+- Double cancellation of same booking
+- Confirm already-cancelled booking → IllegalStateException
 
 ---
 
-## 🚀 STEP 8: SCALABILITY & EXTENSIBILITY
+## 7) Extensibility (~5 min)
 
-### Extension Points
+**"How would you add different pricing strategies?"**
+> "I'd extract pricing into a Strategy interface. BookingManager takes a PricingStrategy in its constructor. To add seasonal or loyalty pricing, I implement a new strategy — no changes to existing code."
 
-#### **1. Pricing Strategies**
 ```java
 interface PricingStrategy {
     double calculateFee(RoomType type, long nights);
@@ -333,107 +339,29 @@ class SeasonalPricing implements PricingStrategy {
 }
 ```
 
-#### **2. New Room Types**
-```java
-enum RoomType {
-    SINGLE(100.0, 1), DOUBLE(150.0, 2), SUITE(300.0, 4),
-    PENTHOUSE(800.0, 6), FAMILY(200.0, 5);
-}
-```
+**"How would you support multiple hotels?"**
+> "Each hotel would have its own RoomManager. A top-level HotelManager routes requests to the right hotel's RoomManager. The BookingManager and Room classes don't change."
 
-#### **3. Multi-Hotel Support**
-```java
-class Hotel {
-    private final String id;
-    private final RoomManager roomManager;
-    // Each hotel manages its own room fleet
-}
-```
+**"How would you add notifications?"**
+> "I'd add an Observer pattern. When a booking is confirmed or cancelled, BookingManager fires an event. Notification channels (email, SMS, push) subscribe to these events. Core booking logic doesn't change."
 
-### Scaling Strategies
+**"How would you add new room types (e.g., PENTHOUSE)?"**
+> "Add PENTHOUSE to the RoomType enum with its basePrice and maxOccupancy. Create rooms with that type. No changes to RoomManager, BookingManager, or Room."
 
-1. **Room Indexing**: Maintain available room queues per type for O(1) lookup
-2. **Horizontal Scaling**: Partition rooms by hotel/location across servers
-3. **Caching**: Cache availability counts, invalidate on reserve/release
-4. **Async Processing**: Queue fee calculations and notifications
+**"How would you scale to millions of rooms?"**
+> "The design already scales horizontally — rooms are independent, locks are per-room. For distributed systems, replace in-memory locks with Redis distributed locks and ConcurrentHashMap with a database. The class structure stays the same."
 
 ---
 
-## 🔧 STEP 9: TRADE-OFFS & DESIGN DECISIONS
+### Complexity
 
-### Decision 1: Room-Level Locking vs Hotel-Level Locking
+| Operation | Time | Space |
+|---|---|---|
+| **SearchAndLockRoom** | O(R × D) worst case | O(D) |
+| **confirmBooking** | O(1) | O(1) |
+| **cancelBooking** | O(D) | O(1) |
 
-**Chosen**: Room-level locking
-
-**Justification**: High throughput — different rooms booked in parallel with zero contention
-
-### Decision 2: Two-Step Flow (Lock → Confirm)
-
-**Chosen**: SearchAndLockRoom → confirmBooking
-
-**Justification**: Mirrors real-world payment flow. Room is reserved while guest pays, preventing race conditions between search and payment.
-
-### Decision 3: Blocking with Timeout
-
-**Chosen**: tryLock with 5 seconds
-
-**Pros**: User gets immediate feedback, prevents infinite waiting
-
-### Decision 4: Separate RoomManager from BookingManager
-
-**Chosen**: RoomManager handles resource registry + locks, BookingManager handles business logic
-
-**Justification**: Single responsibility. RoomManager is reusable across different service layers.
-
----
-
-## 📝 STEP 10: EVALUATION CHECKLIST
-
-### Functional Completeness (30%)
-- [x] Search rooms by type and dates
-- [x] Two-step booking flow (lock → confirm)
-- [x] Calculate total based on nights and room type
-- [x] Cancel bookings and release dates
-- [x] Prevent double-booking
-
-### Concurrency Control (20%)
-- [x] Room-level locking implemented
-- [x] No race conditions
-- [x] No deadlocks
-- [x] Timeout handling (tryLock 5s)
-- [x] Thread-safety documented
-
-### Design Patterns (15%)
-- [x] State (Booking lifecycle)
-- [x] Manager (Resource + Service separation)
-- [x] Repository (Data access)
-
-### Code Quality (20%)
-- [x] Clean, minimal code
-- [x] Proper naming conventions
-- [x] Error handling and validation
-- [x] "Caller MUST hold lock" documentation
-
-### Testing (15%)
-- [x] Single room contention (1/10 succeeds)
-- [x] Parallel different rooms (10/10 succeed)
-- [x] Overlapping date conflict (1/2 succeeds)
-- [x] Cancel + re-book flow (both succeed)
-
-**Total Score**: 100% ✅
-
----
-
-## 🎓 Key Takeaways
-
-1. **Room-level locking** provides high throughput while maintaining consistency
-2. **Two-step flow** (lock → confirm) mirrors real-world payment workflows
-3. **RoomManager / BookingManager separation** follows single responsibility
-4. **Date-based scheduling** (ConcurrentHashMap<LocalDate, String>) enables overlap detection
-5. **Fair locks** (ReentrantLock(true)) prevent thread starvation
-6. **Trade-offs** exist between locking granularity, memory, and throughput
-
-This design demonstrates **production-ready concurrency handling** suitable for real-world hotel booking systems! 🏨
+*R = rooms of requested type, D = days in date range. With available-room indexing: SearchAndLockRoom becomes O(D).*
 
 ---
 
