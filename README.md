@@ -12,7 +12,7 @@ A comprehensive, hands-on guide to **Low-Level Design (LLD)** interviews — cov
 | [SOLID Principles](#-solid-principles) | 5 foundational design principles with bad vs good code examples |
 | [Design Patterns](#-design-patterns) | 15 GoF patterns (Creational, Structural, Behavioral) with Java implementations |
 | [Concurrency Controls](#-concurrency-controls) | 7 essential concurrency patterns for thread-safe system design |
-| [LLD Problems](#-lld-problems) | 9 complete interview-style problems with solutions |
+| [LLD Problems](#-lld-problems) | 10 complete interview-style problems with solutions |
 | [Interview Template](#-interview-template) | A time-boxed framework for delivering LLD interviews in 45 minutes |
 
 ---
@@ -67,7 +67,8 @@ LLD-Interview Prep Handbook/
 │   ├── VehicleRentalSystem/
 │   ├── ElevatorSystem/
 │   ├── RateLimiterSystem/
-│   └── FoodDeliverySystem/
+│   ├── FoodDeliverySystem/
+│   └── SplitwiseSystem/
 │
 └── LLD_INTERVIEW_TEMPLATE.md           # Interview Delivery Framework
 ```
@@ -163,7 +164,7 @@ Each principle includes a README explaining the concept and a Java file demonstr
 
 ## 💡 LLD Problems
 
-9 complete interview-style problems — each with a `SOLUTION.md` (requirements → entities → class design → concurrency → implementation → testing → extensibility) and a runnable Java file.
+10 complete interview-style problems — each with a `SOLUTION.md` (requirements → entities → class design → concurrency → implementation → testing → extensibility) and a runnable Java file.
 
 | Problem | Key Concepts | Concurrency |
 |---------|-------------|-------------|
@@ -176,6 +177,7 @@ Each principle includes a README explaining the concept and a Java file demonstr
 | 🛗 **Elevator System** | SCAN algorithm, dispatch logic, simulation | None (single-threaded simulation) |
 | 🚦 **Rate Limiter System** | Token Bucket, Sliding Window Log, Strategy + Factory patterns | None (single-threaded; per-key locking discussed) |
 | 🍕 **Food Delivery System** | Order lifecycle, nearest-agent dispatch, delivery fee strategies | Agent-level locking (tryLock for assignment) |
+| 💰 **Splitwise System** | Expense splitting (Equal/Exact/Percent), net balancing, settle-up | Balance-pair locking (synchronized per user pair) |
 
 📁 [`problems/`](./problems/)
 
