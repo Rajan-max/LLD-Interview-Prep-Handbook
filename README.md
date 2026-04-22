@@ -12,7 +12,7 @@ A comprehensive, hands-on guide to **Low-Level Design (LLD)** interviews — cov
 | [SOLID Principles](#-solid-principles) | 5 foundational design principles with bad vs good code examples |
 | [Design Patterns](#-design-patterns) | 15 GoF patterns (Creational, Structural, Behavioral) with Java implementations |
 | [Concurrency Controls](#-concurrency-controls) | 7 essential concurrency patterns for thread-safe system design |
-| [LLD Problems](#-lld-problems) | 6 complete interview-style problems with solutions |
+| [LLD Problems](#-lld-problems) | 7 complete interview-style problems with solutions |
 | [Interview Template](#-interview-template) | A time-boxed framework for delivering LLD interviews in 45 minutes |
 
 ---
@@ -64,7 +64,8 @@ LLD-Interview Prep Handbook/
 │   ├── HotelBookingSystem/
 │   ├── EcommerceSystem/
 │   ├── NotificationSystem/
-│   └── VehicleRentalSystem/
+│   ├── VehicleRentalSystem/
+│   └── ElevatorSystem/
 │
 └── LLD_INTERVIEW_TEMPLATE.md           # Interview Delivery Framework
 ```
@@ -160,7 +161,7 @@ Each principle includes a README explaining the concept and a Java file demonstr
 
 ## 💡 LLD Problems
 
-6 complete interview-style problems — each with a `SOLUTION.md` (requirements → entities → class design → concurrency → implementation → testing → extensibility) and a runnable Java file.
+7 complete interview-style problems — each with a `SOLUTION.md` (requirements → entities → class design → concurrency → implementation → testing → extensibility) and a runnable Java file.
 
 | Problem | Key Concepts | Concurrency |
 |---------|-------------|-------------|
@@ -170,6 +171,7 @@ Each principle includes a README explaining the concept and a Java file demonstr
 | 🛒 **E-commerce System** | Inventory management, order lifecycle, payment flow | Stock-level locking, atomic decrement |
 | 🔔 **Notification System** | Observer pattern, multi-channel delivery | Thread-safe observer registration |
 | 🚗 **Vehicle Rental System** | Fleet management, reservation conflicts | Vehicle-level locking |
+| 🛗 **Elevator System** | SCAN algorithm, dispatch logic, simulation | None (single-threaded simulation) |
 
 📁 [`problems/`](./problems/)
 
