@@ -1,164 +1,233 @@
 # Vehicle Rental System - LLD Interview Solution 🚗
-
-> **Following**: LLD_INTERVIEW_TEMPLATE.md structure with strong concurrency focus
-
 ---
 
-## 🎯 STEP 1: REQUIREMENTS GATHERING
+## 1) Requirements (~5 min)
 
-### Functional Requirements
+**Prompt**: "Design a vehicle rental system where customers can search and rent vehicles."
 
-1. **FR1**: Support multiple vehicle types (BIKE, CAR, SUV, TRUCK)
-2. **FR2**: Search available vehicles by type and date range
-3. **FR3**: Reserve vehicle for date range (two-step: lock → confirm)
-4. **FR4**: Calculate rental fee based on duration and vehicle type
-5. **FR5**: Return vehicle and release dates
-6. **FR6**: Cancel rental and release dates
-7. **FR7**: Prevent double-rental with thread-safe operations
-8. **FR8**: Support different pricing strategies
+### Clarifying Questions
 
-### Non-Functional Requirements
+| Theme | Question | Answer |
+|---|---|---|
+| **Primary capabilities** | What operations? | Search vehicles, reserve, confirm, return, cancel |
+| **Primary capabilities** | Vehicle types? | Yes — BIKE, CAR, SUV, TRUCK with different daily rates |
+| **Rules** | How is rental done? | Two-step: lock vehicle → confirm after payment |
+| **Rules** | How is fee calculated? | Days × vehicle daily rate (support different strategies) |
+| **Error handling** | What if no vehicles available? | Reject with error |
+| **Error handling** | Double-rental attempt? | Second request fails gracefully |
+| **Scope** | Concurrent access? | Yes, multiple customers renting simultaneously |
 
-1. **NFR1**: **Concurrency** - Support 500+ concurrent rental requests
-2. **NFR2**: **Performance** - Rental response time < 200ms
-3. **NFR3**: **Consistency** - No double-rental, atomic operations
-4. **NFR4**: **Availability** - 99.9% uptime
-5. **NFR5**: **Scale** - Support 10,000+ vehicles
-6. **NFR6**: **Extensibility** - Easy to add new vehicle types and pricing strategies
-
-### Assumptions
-
-1. In-memory storage (production would use database)
-2. Single rental location (can extend to multiple)
-3. Date-based rentals (pick-up to drop-off)
-4. One vehicle per rental
-5. Payment processing is synchronous
-6. No reservation system beyond the two-step lock → confirm flow
-
-### Out of Scope
-
-1. Multi-location management and transfers
-2. Insurance and damage tracking
-3. GPS tracking and fleet management
-4. Customer loyalty programs
-5. Late return penalties
-6. Vehicle maintenance scheduling
-
----
-
-## 🏗️ STEP 2: DOMAIN MODELING
-
-### Core Entities
-
-#### **Vehicle**
-- **Purpose**: Rentable asset with date-based availability
-- **Attributes**: id, model, type, rentalSchedule
-- **Status**: AVAILABLE → RESERVED → AVAILABLE
-- **Concurrency**: High contention - needs vehicle-level locking
-
-#### **Customer**
-- **Purpose**: Person renting a vehicle
-- **Attributes**: id, name, licenseNumber
-- **Lifecycle**: Immutable after creation
-
-#### **Rental**
-- **Purpose**: Reservation linking customer, vehicle, and dates
-- **Attributes**: id, customer, vehicle, pickUp, dropOff, totalAmount, status
-- **Status**: PENDING → CONFIRMED → RETURNED / CANCELLED
-- **Lifecycle**: Created → Paid → Confirmed → Returned/Cancelled
-
-### Entity Relationships
+### Requirements
 
 ```
-Rental (1) ──for──> (1) Customer
-Rental (1) ──reserves──> (1) Vehicle
-Vehicle (N) ──grouped by──> (1) VehicleType
-Rental (1) ──priced by──> (1) PricingStrategy
+1. Support vehicle types (BIKE, CAR, SUV, TRUCK) with different daily rates
+2. Search available vehicles by type and date range
+3. Reserve a vehicle for a date range (two-step: lock → confirm)
+4. Calculate rental fee based on days × vehicle rate
+5. Return vehicle and release dates
+6. Cancel rental and release dates
+7. Support different pricing strategies (daily, weekly discount)
+8. Prevent double-rental under concurrent access
+
+Out of Scope:
+- Multi-location management and transfers
+- Insurance and damage tracking
+- GPS tracking and fleet management
+- Customer loyalty programs
+- Late return penalties
 ```
 
 ---
 
-## 🎨 STEP 3: DESIGN PATTERNS & ARCHITECTURE
-
-### Architecture Layers
+## 2) Entities & Relationships (~3 min)
 
 ```
-┌─────────────────────────────────────┐
-│   RentalManager (Service Layer)     │ ← Entry point
-├─────────────────────────────────────┤
-│   VehicleManager (Resource Mgmt)    │ ← Vehicle registry + locks
-├─────────────────────────────────────┤
-│   PricingStrategy (Strategy)        │ ← Daily, Weekly discount
-├─────────────────────────────────────┤
-│   Repository Layer (In-memory)      │ ← Data storage
-├─────────────────────────────────────┤
-│   Domain Models (Entities)          │ ← Vehicle, Customer, Rental
-└─────────────────────────────────────┘
+Entities:
+- Vehicle         (rentable asset, owns date-based schedule)
+- Customer        (person renting — immutable)
+- Rental          (links customer + vehicle + dates, tracks status)
+- VehicleManager  (resource registry + per-vehicle locks)
+- RentalManager   (orchestrator — search, lock, confirm, return, cancel)
+- PricingStrategy (calculates fee — swappable via Strategy pattern)
+
+Relationships:
+- RentalManager → VehicleManager (uses for vehicle lookup + locks)
+- RentalManager → RentalRepository (persists rentals)
+- RentalManager → PricingStrategy (calculates fees)
+- Rental → Customer, Vehicle (references)
+- Vehicle grouped by VehicleType
 ```
 
-### Design Patterns Used
-
-#### **1. Strategy Pattern** (Pricing)
-- **Problem**: Different pricing for different rental durations
-- **Solution**: PricingStrategy interface with DailyPricing, WeeklyDiscountPricing
-- **Benefit**: Easy to add seasonal, loyalty, or surge pricing
-
-#### **2. State Pattern** (Rental Lifecycle)
-- **Problem**: Rental transitions through states
-- **Solution**: RentalStatus enum (PENDING → CONFIRMED → RETURNED / CANCELLED)
-- **Benefit**: Clear state transitions, invalid transitions prevented
-
-#### **3. Manager Pattern** (Resource + Service separation)
-- **Problem**: Separate vehicle management from rental business logic
-- **Solution**: VehicleManager (resource registry + locks) + RentalManager (business logic)
-- **Benefit**: Single responsibility, testable components
+**Key decisions:**
+- Locks live inside VehicleManager (not RentalManager) — VehicleManager owns vehicles, so it owns their locks
+- VehicleManager handles resource registry + locks, RentalManager handles business logic (single responsibility)
+- PricingStrategy is injected into RentalManager — swappable at construction time (Strategy pattern)
+- Rental has 4 states: PENDING → CONFIRMED → RETURNED / CANCELLED
 
 ---
 
-## 🔐 STEP 4: CONCURRENCY CONTROL (CRITICAL!)
+## 3) Class Design (~10 min)
 
-### Concurrency Analysis
+### Deriving State from Requirements
 
-#### **Shared Resources**
-1. **Vehicle.rentalSchedule** - Multiple threads renting same vehicle
-2. **RentalRepository** - Concurrent rental creation
-3. **VehicleManager.vehiclesByType** - Concurrent search operations
+| Requirement | What must be tracked | Where |
+|---|---|---|
+| "Vehicle types with daily rates" | id, model, type (with baseDailyRate) | Vehicle, VehicleType enum |
+| "Date-based availability" | rentalSchedule: Map<LocalDate, String> | Vehicle |
+| "Reserve vehicle (lock → confirm)" | id, customer, vehicle, pickUp, dropOff, status, totalAmount | Rental |
+| "Different pricing strategies" | calculateFee(type, days) | PricingStrategy interface |
+| "Prevent double-rental" | per-vehicle ReentrantLock | VehicleManager |
 
-#### **Critical Sections**
-1. **Check availability + Reserve** - Must be atomic
-2. **Confirm rental** - Must verify PENDING status atomically
-3. **Return/Cancel + Release dates** - Must be atomic
+### Deriving Behavior from Requirements
 
-#### **Race Conditions**
-1. **Double-rental**: Two threads rent same vehicle for overlapping dates
-2. **Lost update**: Concurrent status changes overwrite
-3. **Phantom read**: Vehicle appears available but gets rented
+| Need | Method | On |
+|---|---|---|
+| Search and reserve a vehicle | searchAndLockVehicle(customer, type, pickUp, dropOff) → Rental | RentalManager |
+| Confirm after payment | confirmRental(rentalId) → Rental | RentalManager |
+| Return vehicle and release dates | returnVehicle(rentalId) → Rental | RentalManager |
+| Cancel and release dates | cancelRental(rentalId) | RentalManager |
+| Check if vehicle is available for dates | isAvailable(pickUp, dropOff) → bool | Vehicle |
+| Reserve / release dates on vehicle | reserve(pickUp, dropOff, rentalId), release(pickUp, dropOff) | Vehicle |
 
-### Concurrency Strategy: Vehicle-Level Locking ⭐
+### Class Outlines
 
-**Why Vehicle-Level Locking?**
-- ✅ Maximum parallelism (different vehicles = no contention)
-- ✅ Strong consistency (no double-rental)
-- ✅ Scalable (contention only on same vehicle)
-- ✅ Simple (no complex distributed locking)
+```
+class Vehicle:                              // Caller MUST hold lock
+  - id: String
+  - model: String
+  - type: VehicleType
+  - rentalSchedule: ConcurrentHashMap<LocalDate, String>
 
-**Implementation:**
+  + isAvailable(pickUp, dropOff) → bool
+  + reserve(pickUp, dropOff, rentalId)
+  + release(pickUp, dropOff)
+
+class VehicleManager:
+  - vehiclesByType: ConcurrentHashMap<VehicleType, List<Vehicle>>
+  - vehicleLocks: ConcurrentHashMap<String, ReentrantLock>
+
+  + addVehicle(vehicle)
+  + getVehiclesByType(type) → List<Vehicle>
+  + getVehicleLock(vehicleId) → ReentrantLock
+
+class RentalManager:                        // Orchestrator
+  - vehicleManager: VehicleManager
+  - rentalRepository: RentalRepository
+  - pricingStrategy: PricingStrategy
+
+  + searchAndLockVehicle(customer, type, pickUp, dropOff) → Rental
+  + confirmRental(rentalId) → Rental
+  + returnVehicle(rentalId) → Rental
+  + cancelRental(rentalId)
+
+class Rental:
+  - id: String (auto-generated)
+  - customer: Customer
+  - vehicle: Vehicle
+  - pickUp, dropOff: LocalDate
+  - totalAmount: double
+  - status: volatile RentalStatus (PENDING → CONFIRMED → RETURNED / CANCELLED)
+
+  + confirm(), returnVehicle(), cancel()
+
+class Customer:
+  - id, name, licenseNumber (immutable)
+
+interface PricingStrategy:
+  + calculateFee(VehicleType type, long days) → double
+
+enum VehicleType:
+  BIKE(50.0), CAR(100.0), SUV(150.0), TRUCK(200.0)
+  - baseDailyRate
+```
+
+### Key Principle
+
+- **Workflow rules** (can this rental be confirmed? returned?) → RentalManager (orchestrator)
+- **Data rules** (is this date range available?) → Vehicle (owns the schedule)
+- **Pricing rules** → PricingStrategy (swappable, injected)
+
+---
+
+## 4) Concurrency Control (~5 min)
+
+### Three Questions
+
+**What is shared?**
+- Vehicle.rentalSchedule — multiple threads renting the same vehicle for overlapping dates
+
+**What can go wrong?**
+- Double-rental: Two threads rent the same vehicle for overlapping dates
+- Lost update: Concurrent status changes (confirm/cancel/return) overwrite each other
+
+**What's the locking strategy?**
+- Vehicle-level locking. Each vehicle has its own ReentrantLock inside VehicleManager.
+
+### Why Vehicle-Level Locking?
+
+| Approach | Throughput | Decision |
+|---|---|---|
+| **Fleet-level lock** | Very low (serializes everything) | ❌ Too coarse |
+| **Vehicle-level lock** | High (parallel across all vehicles) | ✅ Chosen |
+| **Date-level lock** | Very high but complex deadlock risk | ❌ Over-engineered |
+
+### Concurrency Strategy
+
+```
+Shared resource:
+- Vehicle.rentalSchedule — multiple threads trying to rent same vehicle
+
+Race condition prevented:
+- Double-rental: tryLock + isAvailable + reserve is atomic under lock
+
+Locking approach:
+- Each vehicle has its own ReentrantLock(true) — fair lock, inside VehicleManager
+- searchAndLockVehicle uses tryLock(5s) — skip to next vehicle on timeout
+- confirmRental uses lock() (blocking) — must confirm this specific rental
+- returnVehicle uses lock() (blocking) — must release this specific vehicle's dates
+- cancelRental uses lock() (blocking) — must release this specific vehicle's dates
+
+Thread-safety:
+- Vehicle: ConcurrentHashMap schedule + external lock (caller MUST hold lock)
+- Customer: immutable after creation
+- Rental: volatile status + immutable fields
+- RentalRepository: ConcurrentHashMap
+- VehicleManager: ConcurrentHashMap for vehicles and locks
+```
+
+**Why tryLock(5s) for search (with timeout)?**
+A customer doesn't care *which* vehicle they get — if one is locked, wait briefly then skip to the next. Timeout prevents indefinite blocking.
+
+**Why lock() for confirm/return/cancel (blocking)?**
+We *must* operate on the specific vehicle tied to the rental. We have to wait for the lock.
+
+**No deadlock risk:**
+Each operation locks only one vehicle at a time — no multi-resource locking, no lock ordering needed.
+
+---
+
+## 5) Implementation (~10 min)
+
+### Core Method: searchAndLockVehicle
 
 ```java
-// 1. Each vehicle has its own lock (fair lock)
-private final ConcurrentHashMap<String, ReentrantLock> vehicleLocks;
-
-// 2. Atomic search-and-reserve operation
 public Rental searchAndLockVehicle(Customer customer, VehicleType type,
                                    LocalDate pickUp, LocalDate dropOff) {
+    if (!pickUp.isBefore(dropOff))
+        throw new IllegalArgumentException("Invalid dates");
+
     List<Vehicle> vehicles = vehicleManager.getVehiclesByType(type);
+
     for (Vehicle vehicle : vehicles) {
         ReentrantLock lock = vehicleManager.getVehicleLock(vehicle.getId());
         try {
             if (lock.tryLock(5, TimeUnit.SECONDS)) {
                 try {
                     if (vehicle.isAvailable(pickUp, dropOff)) {
-                        // Reserve dates atomically
+                        long days = ChronoUnit.DAYS.between(pickUp, dropOff);
+                        double amount = pricingStrategy.calculateFee(type, days);
+
+                        Rental rental = new Rental(customer, vehicle, pickUp, dropOff, amount);
                         vehicle.reserve(pickUp, dropOff, rental.getId());
                         rentalRepository.save(rental);
                         return rental;
@@ -172,147 +241,140 @@ public Rental searchAndLockVehicle(Customer customer, VehicleType type,
             throw new RuntimeException("Interrupted");
         }
     }
-    throw new IllegalStateException("No available vehicles");
+    throw new IllegalStateException("No available " + type + " vehicles");
 }
 ```
 
-### Thread-Safety Guarantees
+**What this demonstrates:**
+- Atomic check-and-reserve (no gap between isAvailable and reserve)
+- tryLock with 5s timeout (non-blocking, prevents indefinite wait)
+- Fee calculated via injected PricingStrategy (Strategy pattern)
+- Proper lock release in finally block
+- Iterates through all vehicles of type (first available wins)
 
-| Component | Thread-Safety | Mechanism |
-|-----------|---------------|-----------|
-| **Vehicle** | Thread-safe | Volatile + External lock |
-| **Customer** | Thread-safe | Immutable after creation |
-| **Rental** | Thread-safe | Volatile status + immutable fields |
-| **VehicleManager** | Thread-safe | ConcurrentHashMap + per-vehicle locks |
-| **RentalManager** | Thread-safe | Vehicle-level locking |
-| **RentalRepository** | Thread-safe | ConcurrentHashMap |
+### Core Method: confirmRental
 
-### Concurrency Alternatives Considered
-
-| Approach | Pros | Cons | Decision |
-|----------|------|------|----------|
-| **Fleet-level lock** | Simple | Very low throughput | ❌ Too coarse |
-| **Vehicle-level lock** | High throughput | More memory | ✅ **Chosen** |
-| **Optimistic locking** | No blocking | Retry storms | ❌ High contention |
-| **Date-level lock** | Fine-grained | Complex deadlock risk | ❌ Over-engineered |
-
----
-
-## 💻 STEP 5: CLASS DESIGN & IMPLEMENTATION
-
-### Class Structure
-
-```
-com.rajan.lld.InterviewQuestionsPractice.VehicleRentalSystem
-├── VehicleRentalSystemComplete.java (All-in-one)
-│   ├── Enums (VehicleType, RentalStatus)
-│   ├── Models (Vehicle, Customer, Rental)
-│   ├── Repository (RentalRepository)
-│   ├── Strategy (PricingStrategy, DailyPricing, WeeklyDiscountPricing)
-│   ├── Manager (VehicleManager, RentalManager)
-│   └── Demo (Main class with 4 concurrency tests)
-```
-
-### Key Classes
-
-#### **Vehicle** (High Concurrency)
 ```java
-/**
- * Thread-Safety: Volatile + external lock
- * Concurrency: Caller MUST hold lock before modifying
- */
-class Vehicle {
-    private final String id;
-    private final String model;
-    private final VehicleType type;
-    private final ConcurrentHashMap<LocalDate, String> rentalSchedule;
+public Rental confirmRental(String rentalId) {
+    Rental rental = rentalRepository.findById(rentalId);
+    if (rental == null)
+        throw new IllegalArgumentException("Rental not found");
 
-    // Caller MUST hold lock
-    public boolean isAvailable(LocalDate pickUp, LocalDate dropOff) {
-        for (LocalDate date = pickUp; date.isBefore(dropOff); date = date.plusDays(1)) {
-            if (rentalSchedule.containsKey(date)) return false;
-        }
-        return true;
+    ReentrantLock lock = vehicleManager.getVehicleLock(rental.getVehicle().getId());
+
+    lock.lock();                                     // Blocking — must confirm this specific vehicle
+    try {
+        if (rental.getStatus() != RentalStatus.PENDING)
+            throw new IllegalStateException("Rental cannot be confirmed");
+        rental.confirm();
+        return rental;
+    } finally {
+        lock.unlock();
     }
-
-    // Caller MUST hold lock
-    public void reserve(LocalDate pickUp, LocalDate dropOff, String rentalId) { ... }
-
-    // Caller MUST hold lock
-    public void release(LocalDate pickUp, LocalDate dropOff) { ... }
 }
 ```
 
-#### **RentalManager** (Core Service)
+### Core Method: returnVehicle
+
 ```java
-/**
- * Thread-safe using vehicle-level locking
- * Two-step flow: searchAndLockVehicle → confirmRental
- */
-class RentalManager {
-    private final VehicleManager vehicleManager;
-    private final RentalRepository rentalRepository;
-    private final PricingStrategy pricingStrategy;
+public Rental returnVehicle(String rentalId) {
+    Rental rental = rentalRepository.findById(rentalId);
+    if (rental == null)
+        throw new IllegalArgumentException("Rental not found");
 
-    // Step 1: Search + Lock (before payment)
-    public Rental searchAndLockVehicle(Customer, VehicleType, pickUp, dropOff) { ... }
+    Vehicle vehicle = rental.getVehicle();
+    ReentrantLock lock = vehicleManager.getVehicleLock(vehicle.getId());
 
-    // Step 2: Confirm (after payment)
-    public Rental confirmRental(String rentalId) { ... }
-
-    // Return vehicle
-    public Rental returnVehicle(String rentalId) { ... }
-
-    // Cancel rental
-    public void cancelRental(String rentalId) { ... }
+    lock.lock();                                     // Blocking — must release this specific vehicle
+    try {
+        if (rental.getStatus() != RentalStatus.CONFIRMED)
+            throw new IllegalStateException("Rental not active");
+        vehicle.release(rental.getPickUp(), rental.getDropOff());
+        rental.returnVehicle();
+        return rental;
+    } finally {
+        lock.unlock();
+    }
 }
+```
+
+### Core Method: cancelRental
+
+```java
+public void cancelRental(String rentalId) {
+    Rental rental = rentalRepository.findById(rentalId);
+    if (rental == null)
+        throw new IllegalArgumentException("Rental not found");
+
+    Vehicle vehicle = rental.getVehicle();
+    ReentrantLock lock = vehicleManager.getVehicleLock(vehicle.getId());
+
+    lock.lock();                                     // Blocking — must release this specific vehicle
+    try {
+        vehicle.release(rental.getPickUp(), rental.getDropOff());
+        rental.cancel();
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+**Edge cases handled:**
+- Invalid dates (pickUp not before dropOff) → IllegalArgumentException
+- Rental not found → IllegalArgumentException
+- Confirm non-PENDING rental → IllegalStateException
+- Return non-CONFIRMED rental → IllegalStateException
+- Cancel releases dates back to vehicle's schedule (makes vehicle available again)
+
+### Verification: Walk Through a Scenario
+
+```
+Scenario: Two threads try to rent the same CAR for overlapping dates
+
+Thread A: searchAndLockVehicle(Customer A, CAR, Jan 5-10)
+  → Acquires lock on Vehicle V2
+  → V2.isAvailable(Jan 5-10) = true
+  → V2.reserve(Jan 5-10, "RNT-1001")
+  → Returns Rental RNT-1001 ($500 = 5 days × $100)
+  → Releases lock
+
+Thread B: searchAndLockVehicle(Customer B, CAR, Jan 8-12)
+  → Acquires lock on Vehicle V2 (after Thread A releases)
+  → V2.isAvailable(Jan 8-12) = false (Jan 8,9 already reserved)
+  → Moves to next CAR or throws "No available CAR vehicles"
+
+✓ No double-rental. Atomic check + reserve under lock.
 ```
 
 ---
 
-## 🧪 STEP 6: TESTING STRATEGY
+## 6) Testing Strategy (~3 min)
 
-### Test Distribution
-- **70%** Unit tests
-- **20%** Concurrency tests
-- **10%** Integration tests
+**Functional tests:**
+- Search and lock a CAR, confirm it, verify status = CONFIRMED
+- Calculate total: 5 days × $100 (CAR) = $500
+- Return a confirmed rental, verify dates are released and status = RETURNED
+- Weekly discount: 10 days CAR = 1 week × ($100 × 7 × 0.85) + 3 days × $100 = $895
 
-### Concurrency Tests
+**Concurrency tests:**
+- **Single vehicle contention**: 10 threads, 1 CAR, same dates → only 1 succeeds
+- **Parallel different vehicles**: 10 threads, 10 CARs, same dates → all 10 succeed
+- **Overlapping date conflict**: Thread 1 rents Day 50-55, Thread 2 rents Day 53-58 on same vehicle → one fails
+- **Return and re-rent**: Return vehicle, then another thread rents same vehicle/dates → both succeed
 
-1. **Single Vehicle Concurrent Rental**: 10 threads, same CAR, same dates → Only 1 succeeds
-2. **Different Vehicles**: 10 threads, 10 different CARs → All 10 succeed
-3. **Overlapping Dates**: Thread 1 rents Day 50-55, Thread 2 rents Day 53-58 → One fails
-4. **Return and Rent**: Return vehicle, then another thread rents same vehicle → Both succeed
-
----
-
-## 📊 STEP 7: COMPLEXITY ANALYSIS
-
-### Time Complexity
-
-| Operation | Complexity | Explanation |
-|-----------|------------|-------------|
-| **Search & Lock** | O(V × D) | V vehicles of type, D days to check |
-| **Confirm rental** | O(1) | Status update with lock |
-| **Return vehicle** | O(D) | D days to release |
-| **Cancel rental** | O(D) | D days to release |
-
-### Space Complexity
-
-| Component | Complexity | Explanation |
-|-----------|------------|-------------|
-| **Vehicles** | O(V) | V vehicles in system |
-| **Rentals** | O(R) | R rentals |
-| **Vehicle locks** | O(V) | One lock per vehicle |
-| **Rental schedule** | O(V × D) | V vehicles, D days booked |
+**Edge cases:**
+- All vehicles of a type are rented for requested dates
+- Invalid dates (dropOff before pickUp) → IllegalArgumentException
+- Double return of same rental → IllegalStateException
+- Cancel already-returned rental
 
 ---
 
-## 🚀 STEP 8: SCALABILITY & EXTENSIBILITY
+## 7) Extensibility (~5 min)
 
-### Extension Points
+**"How would you add new pricing strategies (surge, seasonal)?"**
+> "PricingStrategy is already an interface. I'd implement SurgePricing or SeasonalPricing and inject it into RentalManager — no changes to existing code."
 
-#### **1. New Pricing Strategies**
 ```java
 class SurgePricing implements PricingStrategy {
     @Override
@@ -323,109 +385,30 @@ class SurgePricing implements PricingStrategy {
 }
 ```
 
-#### **2. New Vehicle Types**
-```java
-enum VehicleType {
-    BIKE(50.0), CAR(100.0), SUV(150.0), TRUCK(200.0),
-    LUXURY(500.0), ELECTRIC(120.0);
-}
-```
+**"How would you add new vehicle types (LUXURY, ELECTRIC)?"**
+> "Add to the VehicleType enum with its baseDailyRate. Create vehicles with that type. No changes to VehicleManager, RentalManager, or Vehicle."
 
-#### **3. Multi-Location Support**
-```java
-class Location {
-    private final String id;
-    private final VehicleManager vehicleManager;
-    // Each location manages its own fleet
-}
-```
+**"How would you support multiple locations?"**
+> "Each location would have its own VehicleManager. A top-level LocationManager routes requests to the right location's VehicleManager. The RentalManager and Vehicle classes don't change."
 
-### Scaling Strategies
+**"How would you add late return penalties?"**
+> "Add an actualDropOff field to Rental. On returnVehicle, compare actualDropOff with dropOff. If late, calculate penalty via a PenaltyStrategy. The locking mechanism stays the same."
 
-1. **Vehicle Indexing**: Maintain available vehicle queues per type for O(1) lookup
-2. **Horizontal Scaling**: Partition vehicles by location across servers
-3. **Caching**: Cache availability counts, invalidate on reserve/release
-4. **Async Processing**: Queue fee calculations and notifications
+**"How would you scale to millions of vehicles?"**
+> "The design already scales horizontally — vehicles are independent, locks are per-vehicle. For distributed systems, replace in-memory locks with Redis distributed locks and ConcurrentHashMap with a database. The class structure stays the same."
 
 ---
 
-## 🔧 STEP 9: TRADE-OFFS & DESIGN DECISIONS
+### Complexity
 
-### Decision 1: Vehicle-Level Locking vs Fleet-Level Locking
+| Operation | Time | Space |
+|---|---|---|
+| **searchAndLockVehicle** | O(V × D) worst case | O(D) |
+| **confirmRental** | O(1) | O(1) |
+| **returnVehicle** | O(D) | O(1) |
+| **cancelRental** | O(D) | O(1) |
 
-**Chosen**: Vehicle-level locking
-
-**Justification**: High throughput — different vehicles rented in parallel with zero contention
-
-### Decision 2: Two-Step Flow (Lock → Confirm)
-
-**Chosen**: searchAndLockVehicle → confirmRental
-
-**Justification**: Mirrors real-world payment flow. Vehicle is reserved while customer pays, preventing race conditions between search and payment.
-
-### Decision 3: Blocking with Timeout
-
-**Chosen**: tryLock with 5 seconds
-
-**Pros**: User gets immediate feedback, prevents infinite waiting
-
-### Decision 4: Separate VehicleManager from RentalManager
-
-**Chosen**: VehicleManager handles resource registry + locks, RentalManager handles business logic
-
-**Justification**: Single responsibility. VehicleManager is reusable across different service layers.
-
----
-
-## 📝 STEP 10: EVALUATION CHECKLIST
-
-### Functional Completeness (30%)
-- [x] Search vehicles by type and dates
-- [x] Two-step rental flow (lock → confirm)
-- [x] Multiple pricing strategies (Daily, Weekly discount)
-- [x] Return vehicle and release dates
-- [x] Cancel rental and release dates
-- [x] Prevent double-rental
-
-### Concurrency Control (20%)
-- [x] Vehicle-level locking implemented
-- [x] No race conditions
-- [x] No deadlocks
-- [x] Timeout handling (tryLock 5s)
-- [x] Thread-safety documented
-
-### Design Patterns (15%)
-- [x] Strategy (Pricing)
-- [x] State (Rental lifecycle)
-- [x] Manager (Resource + Service separation)
-- [x] Repository (Data access)
-
-### Code Quality (20%)
-- [x] Clean, minimal code
-- [x] Proper naming conventions
-- [x] Error handling and validation
-- [x] "Caller MUST hold lock" documentation
-
-### Testing (15%)
-- [x] Single vehicle contention (1/10 succeeds)
-- [x] Parallel different vehicles (10/10 succeed)
-- [x] Overlapping date conflict (1/2 succeeds)
-- [x] Return + re-rent flow (both succeed)
-
-**Total Score**: 100% ✅
-
----
-
-## 🎓 Key Takeaways
-
-1. **Vehicle-level locking** provides high throughput while maintaining consistency
-2. **Two-step flow** (lock → confirm) mirrors real-world payment workflows
-3. **Strategy pattern** makes pricing extensible without modifying core logic
-4. **VehicleManager / RentalManager separation** follows single responsibility
-5. **Date-based scheduling** (ConcurrentHashMap<LocalDate, String>) enables overlap detection
-6. **Trade-offs** exist between locking granularity, memory, and throughput
-
-This design demonstrates **production-ready concurrency handling** suitable for real-world vehicle rental systems! 🚗
+*V = vehicles of requested type, D = days in date range. With available-vehicle indexing: searchAndLockVehicle becomes O(D).*
 
 ---
 
